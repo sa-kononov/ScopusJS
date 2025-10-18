@@ -8,23 +8,24 @@
 
     <!-- CSS -->
     <style>
+        
         :root {
             --theme-color: rgb(81, 127, 218);
             --error-color: crimson;
             font: medium sans-serif;
         }
-
+        
         .input-div {
             margin: 5px 20px 20px;
             display: flex;
             justify-content: left;
             align-items: center;
         }
-
+        
         .input-label {
             margin-left: 20px;
         }
-
+        
         .result-div {
             margin: 20px 20px;
             display: flex;
@@ -32,7 +33,7 @@
             align-items: center;
             font-weight: bold;
         }
-
+        
         .input {
             width: 500px;
             padding: 5px 10px;
@@ -40,7 +41,7 @@
             font: large monospace;
             outline-color: var(--theme-color);
         }
-
+        
         .reset-button {
             background-color: white;
             border: 2px solid;
@@ -48,7 +49,7 @@
             width: 26px;
             height: 26px;
             border-radius: 13px;
-            font: bold 16px sans-serif;
+            font: bold 18px sans-serif;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -58,13 +59,13 @@
             color: white;
             background-color: var(--element-color);
         }
-
+        
         .clear-button {
             --element-color: #aaa;
             color: var(--element-color);
             border-color: var(--element-color);
         }
-
+        
         #search-button {
             font-size: larger;
             position: relative;
@@ -88,21 +89,26 @@
             background-color: white;
             cursor: progress;
         }
-
+        
         progress {
             margin-left: 5px;
         }
-
+        
         .stop-button {
             --element-color: red;
             color: var(--element-color);
             border-color: var(--element-color);
         }
-
+        
         .error {
             color: var(--error-color);
         }
-
+        
+        th {
+            position: sticky;
+            top: 0;
+        }
+        
         td {
             padding: 3px;
         }
@@ -129,87 +135,78 @@
             margin: 3px 0;
         }
     </style>
-
+    <!-- Scopus client code -->
     <script>
-        //==================== Scopus client code ====================
         const identifiers = {'EID': ['eid', undefined], 'DOI': ['prism:doi', 'https://doi.org/'], 'PMID': ['pubmed-id', 'https://pubmed.ncbi.nlm.nih.gov/']};
         const apikeyrx = /^[a-zA-Z0-9]{32}$/;
         const defcount = 25; // count per repetative request
-        const delay = 200;  // delay between requests [ms]
-
-        var requests;            // array of request objects
-        var ntotal = undefined;  // number of found documents
-        var nloaded = 0;         // counter of loaded documents
-        var offset = 0;          // current offset in search results
-        var canceled = false;    // canceled flag
-        var stopped = false;     // stopped flag
-        var searchTimeout = false;
-        var interval;            // interval object
-        var justnumber = false;  // just finding the number of publications
-
+        const delay = 250;   // delay between requests [ms]
+        const serialUrl = 'https://api.elsevier.com/content/serial/title'; //serial base URL
+        const journalMaxLoadTries = 3;  // max number of tries to load jounal metadata
+        
+        var resTable;
+        var searchRequests;        // array of search request objects
+        var ntotal;                // number of found documents
+        var nloaded = 0;           // counter of loaded documents
+        var offset = 0;            // current offset in search results
+        var canceled = false;      // canceled flag
+        var stopped = false;       // stopped flag
+        var searchInterval;        // search interval object
+        var journalInterval;       // serial interval object
+        var showJustNumber = false;    // just finding the number of publications
+        var headers;               // HTTP headers for Scopus API
+        var journalMap;            // journal metadata map {issn: metadata_entry}
+        var journalLoadTries;      // journal load tries table {issn: ntries}
+        var journalMetricYear;     // year of journal metrics to look up
+        
         const errors = {'invalidQuery': 'Недействительное условие поиска!',
                         'jsonParseError': 'Не могу разобрать JSON-ответ! Результат неполный.',
                         'loadError': 'Ошибка загрузки! Результат неполный.',
                         'timeout': 'Время ожидания ответа истекло! Результат неполный.',
                         'aborted': 'Загрузка прервана!'
-                    }; // predefined error messages
-
-        function resetInvalid(elmid) {
-            let elm;
-            if (typeof(elmid) == 'object')
-                elm = elmid;
-            else if (typeof(elmid) == 'string')
-                elm = document.getElementById(elmid);
-            else
-                return;
-            elm.style['border-color'] = 'var(--theme-color)';
-            return elm;
-        }
-
-        function reset(elmid) {
-            resetInvalid(elmid).value = '';
-        }
-
-        function sendRequest(base_url, headers, count, processResponse) {
-            if (interval !== undefined && (ntotal > 0 && offset >= ntotal || stopped)) {
-                clearInterval(interval);
-                interval = undefined;
+                       }; // predefined error messages
+        
+        function sendSearchRequest(search_url, headers, count) {
+            if (searchInterval && (ntotal > 0 && offset >= ntotal || stopped)) {
+                clearInterval(searchInterval);
+                searchInterval = undefined;
                 return;
             }
-
+        
             let req = new XMLHttpRequest();
-
+        
             req.onload = (evt) => {
                 const res = req.response;
                 if (req.status == 200) {
                     if (!res || typeof res != 'object' || !('search-results' in res))
                         processError('jsonParseError');
                     else {
-                        processResponse(res['search-results']);
-                        if (interval === undefined && ntotal > count && !justnumber) {
-                            interval = setInterval(() => sendRequest(base_url, headers, defcount, displayResultTable), delay);
+                        displaySearchResult(res['search-results']);
+                        if (!searchInterval && ntotal > count && !showJustNumber) {
+                            searchInterval = setInterval(() => sendSearchRequest(search_url, headers, defcount), delay);
                         }
                     }
-                } else
+                } else {
                     processError('Ошибка HTTP ' + req.status + ': ' + req.statusText +
-                                ((typeof res == 'object' && 'service-error' in res) ? '\n' + 'STATUS ' + res['service-error'].status.statusCode + ': ' + res['service-error'].status.statusText : ''));
-                deleteRequest(req);
+                                 ((typeof res == 'object' && 'service-error' in res) ? '\n' + 'STATUS ' + res['service-error'].status.statusCode + ': ' + res['service-error'].status.statusText : ''));
+                }
+                deleteSearchRequest(req);
             };
             req.onerror = (evt) => { processError('loadError'); }
             req.ontimeout = (evt) => { processError('timeout'); }
             req.onabort = (evt) => { processError('aborted'); }
-            req.onloadend = (evt) => { deleteRequest(req); }
-
-            let url = base_url + '&count=' + count + '&start=' + offset;
+            req.onloadend = (evt) => { deleteSearchRequest(req); }
+        
+            let url = search_url + '&count=' + count + '&start=' + offset;
             req.open('GET', url, true);
             for (let key in headers) req.setRequestHeader(key, headers[key]);
             req.responseType = 'json';
             req.send();
             offset += count;
-
-            requests.push(req);
+        
+            searchRequests.push(req);
         }
-
+        
         function updateProgress() {
             let progressElm = document.getElementById('progress');
             if (ntotal === undefined && !stopped)
@@ -224,140 +221,310 @@
                     progressElm.innerHTML += `<progress id="loading" value="${nloaded}" max="${ntotal}">`;
             }
         }
-
+        
         function cancelProgress() {
-            for(let i in requests)
-                if (requests[i] != undefined)
-                    requests[i].abort();
-            canceled = true;
+            for (let i in searchRequests)
+                if (searchRequests[i])
+                    searchRequests[i].abort();
             stopped = true;
+            canceled = true;
+            //processError('aborted')
             updateProgress();
         }
-
-        function deleteRequest(req) {
+        
+        function deleteSearchRequest(req) {
             let nreqs = 0;
-            for (let i in requests) {
-                if (requests[i] !== undefined) {
-                    if (requests[i] === req)
-                        delete requests[i];
+            for (let i in searchRequests) {
+                if (searchRequests[i]) {
+                    if (searchRequests[i] === req)
+                        delete searchRequests[i];
                     else
                         nreqs++;
                 }
             }
-            if (nreqs == 0 && interval === undefined || ntotal > 0 && nloaded >= ntotal)
+            if (nreqs == 0 && !searchInterval || ntotal > 0 && nloaded >= ntotal)
                 stopped = true;
             updateProgress();
         }
-
+        
         function processError(e) {
             let msg = (e in errors ? errors[e] : e);
             document.getElementById('result').innerHTML = '<span class="error">' + msg.replace(/\n/g, '<br />') + '</span>';
             console.error(msg);
             document.getElementById('search-button').disabled = false;
             if (e == 'timeout' && ntotal === undefined) {
-                searchTimeout = true;
                 stopped = true;
                 updateProgress();
             }
         }
-
+        
         function displaySearchResult(res) {
-            ntotal = parseInt(res['opensearch:totalResults']);
-            let msg = 'Найдено ' + ntotal + ' документов в Scopus';
-            document.getElementById('result').innerHTML = msg;
-            console.log(msg);
-            if (ntotal > 0 && !justnumber)
-                displayResultTable(res);
+            let thistotal = parseInt(res['opensearch:totalResults']);
+        
+            if (ntotal !== undefined) {
+                if (ntotal != thistotal)
+                    console.error('totalResults =', thistotal, 'в ответе отличается от начального', ntotal); 
+            } else {
+                ntotal = thistotal;    
+                let msg = `Найдено ${ntotal} документов в Scopus`;
+                document.getElementById('result').innerHTML = msg;
+                console.log(`=== Found ${ntotal} results in Scopus ===`);
+            }
+        
+            if (ntotal > 0 && !showJustNumber)
+                displaySearchResultTable(res);
+        
             document.getElementById('search-button').disabled = false;
         }
-
-        function displayResultTable(res) {
-            const header = '<tr class="header">' +
-                        '<th>Identifiers</th>' +
-                        '<th>First author</th>' +
-                        '<th>Document title</th><th>Cover date</th><th>Type</th>' +
-                        '<th>Cited by</th>' +
-                        '<th>Source title</th><th>Volume</th><th>Issue</th><th>Pages / Art.num.</th>' +
-                        '<th>Source ID</th></tr>\n';
-
-            let restableElm = document.getElementById('restable');
-
-            let thistotal = parseInt(res['opensearch:totalResults']);
-
-            if (thistotal == 0)
-                return 0;
-
-            if (ntotal != thistotal)
-                console.error('totalResults =', thistotal, 'в ответе отличается от начального', ntotal);
-
+        
+        function displaySearchResultTable(res) {
+            const header = '\n<thead>' +
+                           '<tr class="header">' +
+                           '<th>Identifiers</th>' +
+                           '<th>First author</th>' +
+                           '<th>Countries</th>' +
+                           '<th>Document title</th><th>Cover date</th><th>Type</th>' +
+                           '<th>Cited by</th>' +
+                           '<th>Source title</th><th>Volume</th><th>Issue</th><th>Pages / Art.num.</th>' +
+                           '<th>ISSN</th><th>E-ISSN</th>' +
+                           '<th>CiteScore<br/><ins class="metric-year"/></th>' +
+                           '<th>SNIP<br/><ins class="metric-year"/></th><th>SJR<br/><ins class="metric-year"/></th></tr>' +
+                           '</thead>\n';
+        
             let tabcontent;
-            if (restableElm.innerHTML != '')
-                tabcontent = restableElm.innerHTML;
+            if (resTable.innerHTML != '')
+                tabcontent = resTable.innerHTML;
             else
                 tabcontent = header;
-
-            for(let i in res.entry) {
+        
+            for (let i in res.entry) {
                 let entry = res.entry[i];
                 let scpid = entry['dc:identifier'].slice(10);
+                let issn = 'prism:issn' in entry ? entry['prism:issn'] : ('prism:eIssn' in entry ? entry['prism:eIssn'] : '')
                 let scpref;
                 entry.link.forEach((lnk) => {
                     if (lnk['@ref'] == "scopus") scpref = lnk['@href'];
                 });
-                tabcontent += `<tr class="entry" id="scpid${scpid}">\n`;
-                tabcontent += `<td style="width:12%"><p>SCPID: ${scpid}</p>\n`;
+                let countries = new Set();
+                entry.affiliation.forEach((aff) => { countries.add(aff['affiliation-country']); });
+                let affilcountries = Array.from(countries).join(', ');
+                tabcontent += `<tr class="entry" id="scpid${scpid}" data-issn="${issn}">\n`;
+                tabcontent += `<td style="width:12%"><p>SCPID: ${scpid}</p>`;
                 for (let key in identifiers) {
                     let field = identifiers[key][0];
                     if (key == 'EID')
-                        tabcontent += `<p>EID: <a href="${scpref}" target="_blank">` + entry.eid + '</a></p>\n';
+                        tabcontent += `<p>EID: <a href="${scpref}" target="_blank">` + entry.eid + '</a></p>';
                     else if (field in entry) {
-                        tabcontent += `<p>${key}: <a href="${identifiers[key][1] + entry[field]}" target="_blank">` + entry[field] + '</a></p>\n';
+                        tabcontent += `<p>${key}: <a href="${identifiers[key][1] + entry[field]}" target="_blank">` + entry[field] + '</a></p>';
                     }
                 }
                 tabcontent += '</td>\n' +
-                            '<td>' + ('dc:creator' in entry ? entry['dc:creator'] : '') + '</td>\n' +
-                            '<td style="width:20%">' + entry['dc:title'] + '</td>\n' +
-                            '<td class="right" style="width:70px">' + entry['prism:coverDate'] + '</td>\n' +
-                            '<td>' + entry['subtypeDescription'] + '</td>\n' +
-                            '<td class="right">' + entry['citedby-count'] + '</td>\n' +
-                            '<td style="width:15%">' + entry['prism:publicationName'] + '</td>\n' +
-                            '<td class="right">' + ('prism:volume' in entry ? entry['prism:volume'] : '') + '</td>\n' +
-                            '<td class="right">' + ('prism:issueIdentifier' in entry ? entry['prism:issueIdentifier'] : '') + '</td>\n' +
-                            '<td class="right">' + ('prism:pageRange' in entry && entry['prism:pageRange'] != null ? entry['prism:pageRange'] : ('article-number' in entry ? entry['article-number'] : '')) + '</td>\n' +
-                            '<td class="right">' + entry['source-id'] + '</td>\n</tr>\n';
+                              '<td>' + ('dc:creator' in entry ? entry['dc:creator'] : '') + '</td>\n' +
+                              '<td>' + affilcountries + '</td>\n' +
+                              '<td style="width:20%">' + entry['dc:title'] + '</td>\n' +
+                              '<td class="right" style="width:70px">' + entry['prism:coverDate'] + '</td>\n' +
+                              '<td>' + entry['subtypeDescription'] + '</td>\n' +
+                              '<td class="right">' + entry['citedby-count'] + '</td>\n' +
+                              '<td style="width:15%">' + entry['prism:publicationName'] + '</td>\n' +
+                              '<td class="right">' + ('prism:volume' in entry ? entry['prism:volume'] : '') + '</td>\n' +
+                              '<td class="right">' + ('prism:issueIdentifier' in entry ? entry['prism:issueIdentifier'] : '') + '</td>\n' +
+                              '<td class="right">' + ('prism:pageRange' in entry && entry['prism:pageRange'] != null ? entry['prism:pageRange'] : ('article-number' in entry ? entry['article-number'] : '')) + '</td>\n' +
+                              '<td class="right">' + ('prism:issn' in entry ? entry['prism:issn'] : '') + '</td>\n' + 
+                              '<td class="right">' + ('prism:eIssn' in entry ? entry['prism:eIssn'] : '') + '</td>\n' + 
+                              '<td class="citescore"></td><td class="snip"></td><td class="sjr"></td>\n</tr>\n';
             }
-
-            restableElm.innerHTML = tabcontent;
-
+        
+            resTable.innerHTML = '<tbody>\n' + tabcontent + '</tbody>\n';
+        
             nloaded = tabcontent.match(/\<tr/g).length - 1;
-
-            console.log('Загружено', nloaded, 'результатов из', ntotal);
-
+        
+            console.log(`${nloaded} our of ${ntotal} results loaded`);
+        
             return nloaded;
         }
-
+        
+        function fillJournalMetricsYear(year) {
+            journalMetricYear = year;
+            for (let elm of document.getElementsByClassName('metric-year')) {
+                elm.innerHTML = year;
+            }
+        }
+        
+        // Calls to serial title API
+        function loadJournalMetrics() {
+            const entriesLeft = resTable.querySelectorAll('tr.entry:not([data-journal-requested])');
+            if (entriesLeft !== null && entriesLeft.length > 0 && !canceled) {
+                const issns = Array.from(entriesLeft).filter((entry) => {
+                    let issn = entry.getAttribute('data-issn');
+                    if (issn != '' && !(issn in journalMap)) {
+                        return true;
+                    } else {
+                        entry.toggleAttribute('data-journal-requested', true);
+                        return false;    
+                    }
+                })
+                .slice(0, 25)
+                .map((entry) => {
+                    entry.toggleAttribute('data-journal-requested', true);
+                    return entry.getAttribute('data-issn');
+                });
+                sendJournalRequest(issns);
+            }
+            const entriesRequested = resTable.querySelectorAll('tr.entry[data-journal-requested]');
+            if (journalInterval && (entriesRequested && entriesRequested.length >= ntotal || canceled)) {
+                console.log('Clear serialInterval');
+                clearInterval(journalInterval);
+                journalInterval = undefined;
+            }
+        }
+        
+        function sendJournalRequest(issns) {
+            if (issns.length==0) {
+                console.error('sendJournalRequest: Trying to request 0 issns!');
+                return;
+            }
+        
+            let req = new XMLHttpRequest();
+        
+            req.onload = (evt) => { processJournalResponse(evt, req); }
+            req.onerror = (evt) => { processJournalResponse(evt, req); }
+            req.ontimeout = (evt) => { processJournalResponse(evt, req); }
+            req.onabort = (evt) => { processJournalResponse(evt, req); }
+        
+            let url = `${serialUrl}?${issns.map((issn) => `issn=${issn}`).join('&')}&count=${issns.length}`;
+        
+            console.log(`Requesting ${issns.length} serial titles from Scopus by URL:\n${url}`)
+            
+            req.open('GET', url, true);
+            for (let key in headers) req.setRequestHeader(key, headers[key]);
+            req.responseType = 'json';
+            req.send();
+        
+            searchRequests.push(req);
+        }
+        
+        function updateJournalHashmap(journalEntries) {
+            console.log(`Copying ${journalEntries.length} journals to journalMap`);
+        
+            journalEntries.forEach((entry) => {
+                const copyEntry = JSON.parse(JSON.stringify(entry));
+                if ('prism:issn' in entry) {
+                    journalMap[entry['prism:issn'].replace('-', '')] = copyEntry;
+                }
+                if ('prism:eIssn' in entry) {
+                    journalMap[entry['prism:eIssn'].replace('-', '')] = copyEntry;
+                }
+            });
+        }
+        
+        function processJournalResponse(evt, req) {
+            const json = req.response;
+            let msg;
+        
+            if (evt.type == 'load' && req.status == 200 && 
+                'serial-metadata-response' in json && 'entry' in json['serial-metadata-response']) {
+                console.log(`Processing response for URL:\n${req.responseURL}`)
+                updateJournalHashmap(json['serial-metadata-response']['entry']);
+                fillJournalMetrics();
+            } else {
+                if (evt.type == 'abort')
+                    msg = 'Load aborted';
+                else if (evt.type == 'error')
+                    msg = 'Load error';
+                else if (evt.type == 'timeout')
+                    msg = 'Timeout';
+                else if (evt.type == 'load') {
+                    msg = `HTTP status ${req.status}`;
+                    if ('serial-metadata-response' in json && 'error' in json['serial-metadata-response'])
+                        msg = json['serial-metadata-response']['error']
+                } else 
+                    msg = 'Unknown event';
+                console.error('processJournalResponse: EVENT ' + evt.type + ': ' + msg + '\n     while requesting ' + req.responseURL);
+            }
+        }
+        
+        function fillJournalMetrics() {
+            let entries = resTable.querySelectorAll('tr.entry[data-journal-requested]:not([data-metrics-filled])');
+            console.log(`Filling journal metrics for ${entries.length} entries`);
+            for (let entry of entries) {
+                const issn = entry.getAttribute('data-issn');
+        
+                if (issn == '') {
+                    entry.toggleAttribute('data-metrics-filled', true);
+                    continue;
+                }
+                
+                const journal = journalMap[issn];
+        
+                if (!journal) { // should not happen
+                    console.warn(`Could not find journal metadata for ISSN ${issn}`);
+        
+                    if (issn in journalLoadTries) {
+                        journalLoadTries[issn]++;
+                    } else {
+                        journalLoadTries[issn] = 0;
+                    }
+        
+                    if (journalLoadTries[issn] < journalMaxLoadTries) {
+                        console.log(`Requesting journal with ISSN ${issn} again`);
+                        entry.toggleAttribute('data-journal-requested');
+                    } else {
+                        console.error(`Maximum journal load tries reached (${journalMaxLoadTries}) for ISSN ${issn}, give up`);
+                    }
+        
+                    continue; 
+                }
+        
+                entry.toggleAttribute('data-metrics-filled');
+        
+                if ('citeScoreYearInfoList' in journal) {
+                    if (journalMetricYear === undefined)
+                        fillJournalMetricsYear(journal.citeScoreYearInfoList.citeScoreCurrentMetricYear);
+                    if (journalMetricYear == journal.citeScoreYearInfoList.citeScoreCurrentMetricYear)
+                        entry.querySelector('td.citescore').innerHTML = journal.citeScoreYearInfoList.citeScoreCurrentMetric;
+                }
+        
+                if ('SNIPList' in journal) {
+                    let snips = journal.SNIPList.SNIP.filter((e) => e['@year'] == journalMetricYear).map((e) => e['$'])
+                    if (snips.length > 0)
+                        entry.querySelector('td.snip').innerHTML = snips[0]
+                }
+        
+                if ('SJRList' in journal) {
+                    let sjrs = journal.SJRList.SJR.filter((e) => e['@year'] == journalMetricYear).map((e) => e['$'])
+                    if (sjrs.length > 0) 
+                        entry.querySelector('td.sjr').innerHTML = sjrs[0]
+                }
+            }
+        }
+        
+        // Main function to start the search
         function searchScopusPubs() {
+            resTable = document.getElementById('restable');
             offset = 0;
             ntotal = undefined;
             nloaded = 0;
             stopped = false;
             canceled = false;
-            searchTimeout = false;
-            requests = [];
-            interval = undefined;
-
+            searchRequests = [];
+            searchInterval = undefined;
+            journalMap = {};
+            journalLoadTries = {};
+            journalMetricYear = undefined;
+        
             let progressElm = document.getElementById('progress');
             let resultElm = document.getElementById('result');
-            justnumber = document.getElementById('justnumber').checked;
-
-            document.getElementById('restable').innerHTML = progressElm.innerHTML = resultElm.innerHTML = '';
-
+            showJustNumber = document.getElementById('justnumber').checked;
+        
+            resTable.innerHTML = progressElm.innerHTML = resultElm.innerHTML = '';
+        
             const apikeyElm = document.getElementById('apikey');
             if (!apikeyrx.test(apikeyElm.value)) {
                 apikeyElm.style.borderColor = "var(--error-color)";
                 processError('Недействительный API-ключ ' + apikeyElm.value);
                 return;
             }
-
+        
             const searchQueryElm = document.getElementById('searchquery');
             if (searchQueryElm.value.includes('\r') || searchQueryElm.value.includes('\n'))
                 searchQueryElm.value = searchQueryElm.value.replace(/[\r\n]/g, '');
@@ -367,51 +534,58 @@
                 processError('invalidQuery');
                 return;
             }
-
+        
             document.getElementById('search-button').disabled = true;
-
-            base_url = 'https://api.elsevier.com/content/search/scopus?query=' + searchQuery;
-            let headers = {'Accept': 'application/json', 'X-ELS-APIKey': apikeyElm.value};
-
-            console.log('Обращение к базовому URL:', base_url);
-
-            sendRequest(base_url, headers, (justnumber ? 1 : defcount), displaySearchResult);
-
+        
+            let searchUrl = 'https://api.elsevier.com/content/search/scopus?query=' + searchQuery;
+            headers = {'Accept': 'application/json', 'X-ELS-APIKey': apikeyElm.value};
+        
+            console.log('Requesting Scopus Search API URL:', searchUrl);
+        
+            sendSearchRequest(searchUrl, headers, (showJustNumber ? 1 : defcount));
+        
             updateProgress();
+        
+            journalInterval = setInterval(loadJournalMetrics, 1.3*delay);
         }
+    </script>
+    <!-- Pure client code -->
+    <script>
+        // In the values of pureEndpoint и pureUrlTemplate replace <your.pure.server> with the name of your Pure server, i.e. pure.nsu.ru
+        // Replace <api-version> with the actual WS API version enabled for your Pure installation, i.e. 524
+        const pureEndpoint = 'https://<your.pure.server>/ws/api/<api-version>/research-outputs'; 
+        const pureUrlTemplate = 'https://<your.pure.server>/admin/editor/dk/atira/pure/api/shared/model/researchoutput/editor/{pureType}editor.xhtml?scheme=&type=&id={pureId}';
+        // Insert an API key for Pure WS as the value of pureApiKey. 
+        // API key is to be registered in the 'Administration->Api keys' tab of the Pure backend with access to endpoints: Research output, Journal.
+        const pureApiKey = 'indicate-pure-api-key-here'; 
 
-        //==================== Pure client code ====================
-        const pureEndpoint = 'https://<Pure-API-URL>/research-outputs'; // указать адрес сервиса Pure WS вместо <Pure-API-URL>
-        const pureApiKey = '<Valid API key>'; // указать API-ключ для доступа к Pure WS без авторизации вместо <Valid API key>
-        const pureUrlTemplate = 
-            'https://<Pure-URL>/admin/editor/dk/atira/pure/api/shared/model/researchoutput/editor/{pureType}editor.xhtml?scheme=&type=&id={pureId}'; // указать адрес бэкенда Pure вместо <Pure-URL>
-        const pureFields = encodeURIComponent('pureId,type.uri,externalId,externalIdSource,info.*');
-
+        const pureFields = encodeURIComponent('pureId,type.uri,externalId,externalIdSource,info.*,keywordGroups.*');
+        
         let progressElm;
-        let resTable;
         let hideExistingPurePubs = false;
         let pureInterval;
         let nPureReqs, nPureTarget, nCheckedInPure, nFoundInPure, nNoScpId;
         let canceledPure = false;
-
+        
         function enrichScopusPubs() {
             const entriesLeft = resTable.querySelectorAll('tr.entry:not([data-pure-requested])');
-            if (entriesLeft !== null && entriesLeft.length > 0) {
-                console.log(`Enriching ${entriesLeft.length} pubs`);
+            if (entriesLeft !== null && entriesLeft.length > 0 && !canceledPure) {
+                console.log(`Enriching ${entriesLeft.length} pubs with Pure entries`);
                 nPureReqs += entriesLeft.length;
                 entriesLeft.forEach((entry) => sendPureRequest(entry));
             }
             const entriesRequested = resTable.querySelectorAll('tr.entry[data-pure-requested]');
-            nPureTarget = canceled ? entriesRequested.length : ntotal;
-            if ((entriesRequested && entriesRequested.length >= nPureTarget || searchTimeout || canceledPure) && pureInterval) {
+            nPureTarget = canceledPure ? entriesRequested.length : ntotal;
+            if ((entriesRequested && entriesRequested.length >= nPureTarget || canceledPure || stopped) && pureInterval) {
                 console.log('Clear pureInterval');
                 clearInterval(pureInterval);
                 pureInterval = undefined;
+                updatePureProgress();
             }
         }
-
+        
         function sendPureRequest(entry) {
-            const scpid = entry.id.substr(5, 11);
+            const scpid = entry.id.slice(5);
             const ids = entry.children[0].innerHTML;
             const m = ids.match(/DOI: *\<a .+\> *(10\.[^ <]+).*/);
             const doi = m !== null ?  m[1] : undefined;
@@ -420,27 +594,27 @@
                 url = `${pureEndpoint}?q=${encodeURIComponent(doi)}&fields=${pureFields}&apiKey=${pureApiKey}`;
             else
                 url = `${pureEndpoint}/${scpid}?idClassificationType=source&fields=${pureFields}&apiKey=${pureApiKey}`;
-
-            entry.setAttribute('data-pure-requested', '1');
-
+        
+            entry.toggleAttribute('data-pure-requested', true);
+        
             const req = new XMLHttpRequest();
-
+        
             req.onload = (evt) => { processPureResponse(evt, req, scpid); };
             req.onerror = (evt) => { processPureResponse(evt, req, scpid); };
             req.onabort = (evt) => { processPureResponse(evt, req, scpid); };
             req.ontimeout = (evt) => { processPureResponse(evt, req, scpid); };
-
+        
             req.open('GET', url, true);
             req.setRequestHeader('Accept', 'application/json');
             req.responseType = 'json';
             req.send();
         }
-
+        
         function processPureResponse(evt, req, scpid) {
-            const res = req.response;
-
+            const json = req.response;
+        
             --nPureReqs;
-
+        
             let entry = resTable.querySelector(`tr.entry[id="scpid${scpid}"]`);
             if (!entry) {
                 console.error(`Internal error: Entry with Scopus ID ${scpid} not found`);
@@ -448,31 +622,26 @@
             }
             let content;
             let msg;
-
+        
             if (evt.type == 'load' && (req.status == 200 || req.status == 404)) {
-                entry.setAttribute('data-pure-checked', '1'); // mark entries checked in Pure
+                entry.toggleAttribute('data-pure-checked', true); // mark entries checked in Pure
                 nCheckedInPure++;
-                if (req.status == 200 && 'items' in res && res.items.length > 0) {
+                if (req.status == 200 && ('items' in json && json.items.length > 0 || 'pureId' in json)) {
                     nFoundInPure++;
-                    let pureRes = findPubInPureJson(res, scpid, 'Scopus');
-                    if (pureRes.matched && pureRes.isScpKw) {
-                        entry.setAttribute('data-pure-full', '1'); // mark entries existing in Pure
-                        if (hideExistingPurePubs)
-                            entry.setAttribute('hidden', ''); // hide the publication row
+                    let pureRes = findPubInPureJson(json, scpid, 'Scopus');
+                    if (pureRes.matched) {
+                        entry.toggleAttribute('data-pure-full', true); // mark entries existing in Pure
+                        if (hideExistingPurePubs) entry.toggleAttribute('hidden', true); // hide the publication row
                     } else {
-                        if (!pureRes.matched) {
-                            entry.setAttribute('data-pure-noscpid', '1'); // mark entry does not have a Scopus ID
-                            nNoScpId++;
-                        }
-                        if (!pureRes.isScpKw) {
-                            entry.setAttribute('data-pure-noscpkw', '1'); // mark entry does not have a Scopus index keyword
-                            nNoScpKw++;
-                        }
+                        entry.toggleAttribute('data-pure-noscpid', true); // mark entry does not have a Scopus ID
+                        nNoScpId++;
                     }
                     let url = pureUrlTemplate.replace('{pureType}', pureRes.type).replace('{pureId}', pureRes.id);
-                    content = `<p>PureID: <a href="${url}" target="_blank">${pureRes.id}</a>` + (pureRes.matched ? '' : '<br /><span class="error">Не введен Scopus ID</span>') + (pureRes.isScpKw ? '' : '<br /><span class="error">Нет Scopus в ключевых словах</span>') + '</p>';
+                    content = `<p><b>PureID: <a href="${url}" target="_blank">${pureRes.id}</a>` + 
+                              (pureRes.matched ? '' : '<br /><span class="error">Не введен Scopus ID</span>') + 
+                              '</b></p>';
                 } else
-                    content = '<p><span class="error"><b>Нет публикации в Pure</b></span></p>';
+                    content = '<p><span class="error"><b>Публикации нет в Pure</b></span></p>';
             } else {
                 if (evt.type == 'abort')
                     msg = 'Загрузка прервана';
@@ -490,35 +659,39 @@
                 entry.children[0].innerHTML += `<p><span class="error">Pure: ${msg}</span></p>`;
             else if (content)
                 entry.children[0].innerHTML += content;
-
+        
             updatePureProgress();
         }
-
+        
         function findPubInPureJson(json, id, source) {
             let res = { matched: false };
-            json.items.forEach((item) => {
-                if (!res.id) {
-                    if ('externalIdSource' in item && item.externalIdSource == source && item.externalId == id)
-                        res.id = item.pureId;
-                    else if ('info' in item && 'additionalExternalIds' in item.info)
-                        item.info.additionalExternalIds.forEach((x) => { if (x.idSource == source && x.value == id) res.id = item.pureId; });
-                    if (res.id) {
-                        res.item = item;
-                        res.type = item.type.uri.split('/')[6] // тип Research Output в uri
-                        res.matched = true;
+            if ('items' in json) { //  results of a search by DOI
+                json.items.forEach((item) => {
+                    if (!res.id) {
+                        if ('externalIdSource' in item && item.externalIdSource == source && item.externalId == id)
+                            res.id = item.pureId;
+                        else if ('info' in item && 'additionalExternalIds' in item.info)
+                            item.info.additionalExternalIds.forEach((x) => { if (x.idSource == source && x.value == id) res.id = item.pureId; });
+                        if (res.id) {
+                            res.item = item;
+                            res.matched = true;
+                        }
                     }
+                });
+                if (!res.matched) {
+                    res.item = json.items[0];
                 }
-            });
-            if (!res.matched) {
-                res.id = json.items[0].pureId;
-                res.type = json.items[0].type.uri.split('/')[6]; // тип Research Output в uri
-                res.item = json.items[0];
+            } else { // result of a search by Scopus ID
+                res.item = json;
+                res.matched = true;
             }
+            res.id = res.item.pureId;
+            res.type = res.item.type.uri.split('/')[6]
             return res;
         }
-
+        
         function updatePureProgress() {
-            progressElm.innerHTML = `<label for="loading-pure">Проверено ${nCheckedInPure} документов в Pure</label>`;
+            progressElm.innerHTML = `<label for="loading-pure">Проверено ${nCheckedInPure}, найдено ${nFoundInPure} документов в Pure</label>`;
             if (pureInterval && !canceledPure)
                 progressElm.innerHTML += `<input type="button" class="reset-button stop-button" value="&times;" onclick="cancelPureProgress()">`;
             if (nPureReqs == 0 && !pureInterval)
@@ -526,23 +699,23 @@
             if (nCheckedInPure < nPureTarget && !canceledPure)
                 progressElm.innerHTML += `<progress id="loading-pure" value="${nCheckedInPure}" max="${nPureTarget}">`;
         }
-
+        
         function cancelPureProgress() {
             canceledPure = true;
             console.warn('Загрузка из Pure прервана');
             updatePureProgress();
         }
-
-
+        
+        
         function toggleHiddenPubs() {
             if (resTable === undefined) return;
             hideExistingPurePubs = document.getElementById('hide-existing-in-pure').checked;
-
+        
             const entries = resTable.querySelectorAll('tr.entry[data-pure-full]');
             if (entries !== null)
-                entries.forEach((x) => { hideExistingPurePubs ? x.setAttribute('hidden', '') : x.removeAttribute('hidden'); });
+                entries.forEach((x) => x.toggleAttribute('hidden'));
         }
-
+        
         function searchScopusPure() {
             resTable = document.getElementById('restable');
             progressElm = document.getElementById('progress-pure');
@@ -554,10 +727,35 @@
             nFoundInPure = 0;
             nNoScpId = 0;
             progressElm.innerHTML = '';
-
+        
             searchScopusPubs();
-
+        
             pureInterval = setInterval(enrichScopusPubs, 2*delay);
+        }
+    </script>
+    <!-- Page code -->
+    <script>
+        function resetInvalid(elmid) {
+            let elm;
+            if (typeof(elmid) == 'object')
+                elm = elmid;
+            else if (typeof(elmid) == 'string')
+                elm = document.getElementById(elmid);
+            else
+                return;
+            elm.style['border-color'] = 'var(--theme-color)';
+            return elm;
+        }
+        
+        function reset(elmid) {
+            resetInvalid(elmid).value = '';
+        }
+        
+        function toggleJustNumber() {
+            if (document.getElementById('justnumber').checked)
+                document.getElementById('hide-existing-in-pure').setAttribute('disabled', 'true');
+            else
+                document.getElementById('hide-existing-in-pure').removeAttribute('disabled');
         }
     </script>
 </head>
@@ -565,7 +763,7 @@
 <body>
     <label for="apikey" class="input-label">API-ключ Scopus:</label>
     <div class="input-div">
-        <input type="text" id="apikey" class="input" placeholder="Введите API-ключ Scopus" value="" onchange="resetInvalid(this)" onclick="resetInvalid(this)">
+        <input type="text" id="apikey" class="input" placeholder="Введите API-ключ" onchange="resetInvalid(this)" onclick="resetInvalid(this)">
         <input type="button" class="reset-button clear-button" value="&times;" onclick="reset('apikey')">
     </div>
     <label for="searchquery" class="input-label"><b>Строка поиска в Scopus:</b></label>
@@ -573,9 +771,9 @@
         <textarea id="searchquery" class="input" cols="50" rows="2" placeholder="Введите условие поиска" onchange="resetInvalid(this)" onclick="resetInvalid(this)"></textarea>
         <input type="button" class="reset-button clear-button" value="&times;" onclick="reset('searchquery')">
     </div>
-    <p class="input-div"><a href="https://service.elsevier.com/app/answers/detail/a_id/11236/supporthub/scopus/" target="_blank">Справка по полям поиска</a></p>
+    <p class="input-div"><a href="https://service.elsevier.com/app/answers/detail/a_id/11365/supporthub/scopus/kw/advanced+search/" target="_blank">Справка по полям поиска</a></p>
     <div class="input-div">
-        <input type="checkbox" id="justnumber" value="false"><label for="justnumber">Получить только число публикаций</label>
+        <input type="checkbox" id="justnumber" onchange="toggleJustNumber()"><label for="justnumber">Получить только число публикаций</label>
     </div>
     <div class="input-div">
         <input type="checkbox" id="hide-existing-in-pure" checked="true" onchange="toggleHiddenPubs()"><label for="hide-existing-in-pure">Скрыть публикации, имеющиеся в Pure</label>
@@ -586,8 +784,8 @@
         </button>
     </div>
 
-    <div id="progress" class="result-div"></div>
     <div id="result" class="result-div"></div>
+    <div id="progress" class="result-div"></div>
     <div id="progress-pure" class="result-div"></div>
     <table id="restable"></table>
 </body>
